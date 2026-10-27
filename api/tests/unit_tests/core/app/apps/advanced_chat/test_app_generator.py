@@ -383,7 +383,9 @@ class TestAdvancedChatAppGeneratorInternals:
             "core.app.apps.advanced_chat.app_generator.current_app",
             SimpleNamespace(_get_current_object=lambda: SimpleNamespace(name="flask")),
         )
-        monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.contextvars.copy_context", lambda: "ctx")
+        monkeypatch.setattr(
+            "core.app.apps.advanced_chat.app_generator.capture_instruction_context", lambda *args: "ctx"
+        )
 
         class _Thread:
             def __init__(self, *, target, kwargs):
@@ -480,7 +482,9 @@ class TestAdvancedChatAppGeneratorInternals:
             "core.app.apps.advanced_chat.app_generator.current_app",
             SimpleNamespace(_get_current_object=lambda: SimpleNamespace(name="flask")),
         )
-        monkeypatch.setattr("core.app.apps.advanced_chat.app_generator.contextvars.copy_context", lambda: "ctx")
+        monkeypatch.setattr(
+            "core.app.apps.advanced_chat.app_generator.capture_instruction_context", lambda *args: "ctx"
+        )
 
         class _Thread:
             def __init__(self, *, target, kwargs):

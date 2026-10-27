@@ -15,6 +15,11 @@ from sqlalchemy.orm import Session, sessionmaker
 import contexts
 from configs import dify_config
 from constants import UUID_NIL
+from dify_graph.context.transient_instruction import (
+    capture_instruction_context,
+    has_pending_instruction,
+    validate_instruction_target,
+)
 
 if TYPE_CHECKING:
     from controllers.console.app.workflow import LoopNodeRunPayload
@@ -121,6 +126,9 @@ class AdvancedChatAppGenerator(MessageBasedAppGenerator):
         :param invoke_from: invoke from source
         :param streaming: is stream
         """
+        if has_pending_instruction():
+            validate_instruction_target(app_model.id, workflow.graph_dict["nodes"])
+
         if not args.get("query"):
             raise ValueError("query is required")
 
@@ -498,8 +506,10 @@ class AdvancedChatAppGenerator(MessageBasedAppGenerator):
                 )
             )
 
-        # new thread with request context and contextvars
-        context = contextvars.copy_context()
+        # Transient instructions live only in worker context, never in generate entities.
+        context = capture_instruction_context(
+            application_generate_entity.app_config.app_id, application_generate_entity.workflow_run_id
+        )
 
         worker_thread = threading.Thread(
             target=self._generate_worker,

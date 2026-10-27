@@ -1,4 +1,5 @@
 import logging
+from contextlib import nullcontext
 from typing import Any, Literal
 from uuid import UUID
 
@@ -28,6 +29,7 @@ from core.errors.error import (
     QuotaExceededError,
 )
 from core.helper.trace_id_helper import get_external_trace_id
+from dify_graph.context.transient_instruction import instruction_scope
 from dify_graph.model_runtime.errors.invoke import InvokeError
 from libs import helper
 from libs.helper import UUIDStrOrEmpty
@@ -74,7 +76,25 @@ class ChatRequestPayload(BaseModel):
             raise ValueError("conversation_id must be a valid UUID") from exc
 
 
-register_schema_models(service_api_ns, CompletionRequestPayload, ChatRequestPayload)
+class TransientInstructionPayload(BaseModel):
+    node_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    text: str = Field(min_length=1, max_length=8192, repr=False)
+
+
+class TransientChatRequestPayload(ChatRequestPayload):
+    # Async/streaming jobs would need to serialize the instruction; reject them.
+    response_mode: Literal["blocking"] = "blocking"
+    auto_generate_name: Literal[False] = False
+    transient_context: TransientInstructionPayload
+
+
+register_schema_models(
+    service_api_ns,
+    CompletionRequestPayload,
+    ChatRequestPayload,
+    TransientInstructionPayload,
+    TransientChatRequestPayload,
+)
 
 
 @service_api_ns.route("/completion-messages")
@@ -173,6 +193,8 @@ class CompletionStopApi(Resource):
 
 @service_api_ns.route("/chat-messages")
 class ChatApi(Resource):
+    payload_model: type[ChatRequestPayload] = ChatRequestPayload
+
     @service_api_ns.expect(service_api_ns.models[ChatRequestPayload.__name__])
     @service_api_ns.doc("create_chat_message")
     @service_api_ns.doc(description="Send a message in a chat conversation")
@@ -197,21 +219,32 @@ class ChatApi(Resource):
         if app_mode not in {AppMode.CHAT, AppMode.AGENT_CHAT, AppMode.ADVANCED_CHAT}:
             raise NotChatAppError()
 
-        payload = ChatRequestPayload.model_validate(service_api_ns.payload or {})
+        payload = self.payload_model.model_validate(service_api_ns.payload or {})
+        if isinstance(payload, TransientChatRequestPayload) and app_mode != AppMode.ADVANCED_CHAT:
+            raise BadRequest("Transient instructions require an advanced chat workflow")
 
         external_trace_id = get_external_trace_id(request)
-        args = payload.model_dump(exclude_none=True)
+        args = payload.model_dump(exclude_none=True, exclude={"transient_context"})
         if external_trace_id:
             args["external_trace_id"] = external_trace_id
 
         streaming = payload.response_mode == "streaming"
 
         try:
-            response = AppGenerateService.generate(
-                app_model=app_model, user=end_user, args=args, invoke_from=InvokeFrom.SERVICE_API, streaming=streaming
+            scope = (
+                instruction_scope(app_model.id, payload.transient_context.node_id, payload.transient_context.text)
+                if isinstance(payload, TransientChatRequestPayload)
+                else nullcontext()
             )
-
-            return helper.compact_generate_response(response)
+            with scope:
+                response = AppGenerateService.generate(
+                    app_model=app_model,
+                    user=end_user,
+                    args=args,
+                    invoke_from=InvokeFrom.SERVICE_API,
+                    streaming=streaming,
+                )
+                return helper.compact_generate_response(response)
         except WorkflowNotFoundError as ex:
             raise NotFound(str(ex))
         except IsDraftWorkflowError as ex:
@@ -240,6 +273,17 @@ class ChatApi(Resource):
         except Exception:
             logger.exception("internal server error.")
             raise InternalServerError()
+
+
+@service_api_ns.route("/chat-messages/transient")
+class TransientChatApi(ChatApi):
+    """Blocking chat with a request-only instruction for a designated LLM node.
+
+    A separate route makes older deployments fail closed instead of silently
+    ignoring the transient field. Only the factual query is stored as a message.
+    """
+
+    payload_model = TransientChatRequestPayload
 
 
 @service_api_ns.route("/chat-messages/<string:task_id>/stop")

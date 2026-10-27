@@ -906,3 +906,36 @@ class TestReasoningFormat:
 
         assert clean_text == text_with_think
         assert reasoning_content == ""
+
+
+@pytest.mark.parametrize("target_node", ["1", "other", None])
+def test_transient_instruction_reaches_only_target_provider_without_saved_prompt(llm_node, target_node):
+    from contextlib import nullcontext
+
+    from dify_graph.context.transient_instruction import capture_instruction_context, instruction_scope
+    from dify_graph.enums import WorkflowNodeExecutionStatus
+    from dify_graph.model_runtime.entities.llm_entities import LLMUsage
+    from dify_graph.node_events import ModelInvokeCompletedEvent, StreamCompletedEvent
+
+    llm_node.node_data.vision.enabled = False
+    llm_node.graph_runtime_state.variable_pool.add(["sys", "workflow_run_id"], "run")
+    llm_node._model_instance.model_name = "test-model"
+    llm_node._model_instance.provider = "test-provider"
+    llm_node._model_instance.stop = []
+    original = [UserPromptMessage(content="authorized record facts")]
+    completed = ModelInvokeCompletedEvent(text="care reply", usage=LLMUsage.empty_usage(), finish_reason="stop")
+    scope = instruction_scope("app", target_node, "private-canary") if target_node else nullcontext()
+    with scope:
+        context = capture_instruction_context("app", "run")
+    with (
+        mock.patch.object(LLMNode, "fetch_prompt_messages", return_value=(original, [])),
+        mock.patch.object(LLMNode, "invoke_llm", return_value=iter([completed])) as invoke,
+    ):
+        events = context.run(lambda: list(llm_node._run()))
+    result = next(event.node_run_result for event in events if isinstance(event, StreamCompletedEvent))
+    assert result.status == WorkflowNodeExecutionStatus.SUCCEEDED
+    sent = invoke.call_args.kwargs["prompt_messages"]
+    assert any(message.content == "private-canary" for message in sent) is (target_node == "1")
+    assert original == [UserPromptMessage(content="authorized record facts")]
+    assert "private-canary" not in str(result.process_data)
+    assert "private-canary" not in str(result.inputs)

@@ -18,6 +18,7 @@ from core.prompt.entities.advanced_prompt_entities import CompletionModelPromptT
 from core.prompt.utils.prompt_message_util import PromptMessageUtil
 from core.tools.signature import sign_upload_file
 from dify_graph.constants import SYSTEM_VARIABLE_NODE_ID
+from dify_graph.context.transient_instruction import transient_instruction_for
 from dify_graph.entities import GraphInitParams
 from dify_graph.entities.graph_config import NodeConfigDict
 from dify_graph.enums import (
@@ -41,7 +42,7 @@ from dify_graph.model_runtime.entities.llm_entities import (
     LLMStructuredOutput,
     LLMUsage,
 )
-from dify_graph.model_runtime.entities.message_entities import PromptMessageContentUnionTypes
+from dify_graph.model_runtime.entities.message_entities import PromptMessageContentUnionTypes, SystemPromptMessage
 from dify_graph.model_runtime.memory import PromptMessageMemory
 from dify_graph.model_runtime.utils.encoders import jsonable_encoder
 from dify_graph.node_events import (
@@ -233,10 +234,17 @@ class LLMNode(Node[LLMNodeData]):
                 template_renderer=self._template_renderer,
             )
 
+            # Keep saved prompt records unchanged; only the provider call gets this instruction.
+            inference_messages = list(prompt_messages)
+            run_id = variable_pool.get((SYSTEM_VARIABLE_NODE_ID, SystemVariableKey.WORKFLOW_EXECUTION_ID))
+            instruction = transient_instruction_for(self._node_id, run_id.text if run_id else "")
+            if instruction:
+                inference_messages.append(SystemPromptMessage(content=instruction))
+
             # handle invoke result
             generator = LLMNode.invoke_llm(
                 model_instance=model_instance,
-                prompt_messages=prompt_messages,
+                prompt_messages=inference_messages,
                 stop=stop,
                 user_id=self.require_dify_context().user_id,
                 structured_output_enabled=self.node_data.structured_output_enabled,
